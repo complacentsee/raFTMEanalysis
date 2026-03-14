@@ -24,6 +24,14 @@ DualEventSink::DualEventSink(const wchar_t* label)
     DWORD* pDW = (DWORD*)m_pad;
     pDW[0] = 1;  // fake initial value at +8
 
+    // Canary sentinels to detect writes beyond observed maximum.
+    // Observed writes extend to ~obj+528 (m_pad+520). Canaries placed at
+    // m_pad+504 (obj+512) and beyond so any overrun is visible in logs.
+    ((DWORD*)(m_pad + 504))[0] = 0xCAFEBABE;   // obj+512 — near observed write boundary
+    ((DWORD*)(m_pad + 508))[0] = 0xDEADDEAD;   // obj+516
+    ((DWORD*)(m_pad + 1020))[0] = 0xBAADF00D;   // ~1 KB into pad — overflow guard
+    ((DWORD*)(m_pad + 2044))[0] = 0xCAFEBABE;   // near end of pad — overflow guard
+
     InitializeCriticalSection(&m_cs);
 
     // Create Free Threaded Marshaler for cross-apartment calls
@@ -56,6 +64,22 @@ void DualEventSink::DumpDWords(const wchar_t* label, int count)
         if (val != 0)
             Log(L"  +%03d: 0x%08X (%u / %d)", i * 4 + 8, val, val, (int)val);
     }
+}
+
+void DualEventSink::CheckCanaries(const wchar_t* label)
+{
+    DWORD v504  = *(DWORD*)(m_pad + 504);
+    DWORD v508  = *(DWORD*)(m_pad + 508);
+    DWORD v1020 = *(DWORD*)(m_pad + 1020);
+    DWORD v2044 = *(DWORD*)(m_pad + 2044);
+
+    if (v504  != 0xCAFEBABE) Log(L"[CANARY@%s] OVERWRITTEN m_pad+504  (obj+512): 0x%08X", label, v504);
+    if (v508  != 0xDEADDEAD) Log(L"[CANARY@%s] OVERWRITTEN m_pad+508  (obj+516): 0x%08X", label, v508);
+    if (v1020 != 0xBAADF00D) Log(L"[CANARY@%s] OVERWRITTEN m_pad+1020 (obj+1028): 0x%08X", label, v1020);
+    if (v2044 != 0xCAFEBABE) Log(L"[CANARY@%s] OVERWRITTEN m_pad+2044 (obj+2052): 0x%08X", label, v2044);
+
+    if (v504 == 0xCAFEBABE && v508 == 0xDEADDEAD && v1020 == 0xBAADF00D && v2044 == 0xCAFEBABE)
+        Log(L"[CANARY@%s] all intact", label);
 }
 
 // --- IUnknown ---

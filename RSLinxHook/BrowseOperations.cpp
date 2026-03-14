@@ -270,6 +270,8 @@ HRESULT DoBusBrowse()
                         cpIdx++;
                     }
                     Log(L"[BUS]   Connected %d device enum CPs", cpIdx);
+                    pSink->DumpDWords(L"after-advise");
+                    pSink->CheckCanaries(L"after-advise");
                     pEnumCP->Release();
                 }
                 pDevCPC->Release();
@@ -278,6 +280,8 @@ HRESULT DoBusBrowse()
 
         HRESULT hrStart = TryStartAtSlot(pDevEnum, pDevPath, 7);
         Log(L"[BUS]   Start(device path) via device enum: hr=0x%08x", hrStart);
+        pSink->DumpDWords(L"after-start");
+        pSink->CheckCanaries(L"after-start");
         if (SUCCEEDED(hrStart))
         {
             startedCount++;
@@ -514,9 +518,13 @@ HRESULT DoBackplaneBrowse()
             }
         }
         Log(L"[BP]   Connected %d CPs for \"%s\"", cpCount, sinkLabel.c_str());
+        pSink->DumpDWords(L"after-advise");
+        pSink->CheckCanaries(L"after-advise");
 
         HRESULT hrStart = TryStartAtSlot(pBPEnum, pBPPath, 7);
         Log(L"[BP]   Start(bus path): hr=0x%08x", hrStart);
+        pSink->DumpDWords(L"after-start");
+        pSink->CheckCanaries(L"after-start");
         if (SUCCEEDED(hrStart))
         {
             startedCount++;
@@ -826,6 +834,8 @@ HRESULT DoMainSTABrowse()
                     cpIdx++;
                 }
                 Log(L"[MAIN-STA] Connected %d enumerator CPs", cpIdx);
+                pSink->DumpDWords(L"after-enum-advise");
+                pSink->CheckCanaries(L"after-enum-advise");
                 pEnumCPEnum->Release();
             }
             pEnumCPC->Release();
@@ -868,6 +878,8 @@ HRESULT DoMainSTABrowse()
         hrDrvStart = TryStartAtSlot(pBusEnum, pPathObject, 7);
         Log(L"[MAIN-STA] Start(bus.path) via bus-QI enum: hr=0x%08x", hrDrvStart);
         pSink->DumpCounters(L"main-after-start");
+        pSink->DumpDWords(L"after-start");
+        pSink->CheckCanaries(L"after-start");
 
         if (SUCCEEDED(hrDrvStart))
             Log(L"[MAIN-STA] Browse started for '%s' (bus-QI path)!", drv.name.c_str());
@@ -886,6 +898,8 @@ HRESULT DoMainSTABrowse()
             hrDrvStart = TryStartAtSlot(pRealEnum, pPathObject, 7);
             Log(L"[MAIN-STA] Start(bus.path) via standalone: hr=0x%08x", hrDrvStart);
             pSink->DumpCounters(L"main-after-start");
+            pSink->DumpDWords(L"after-start");
+            pSink->CheckCanaries(L"after-start");
 
             if (SUCCEEDED(hrDrvStart))
                 Log(L"[MAIN-STA] Browse started for '%s' (standalone fallback)!", drv.name.c_str());

@@ -20,24 +20,28 @@ extern volatile bool g_captureBuses;
 // 3. FTM (Free Threaded Marshaler) enables cross-apartment event
 //    delivery without proxy/stubs
 // 4. Padding at +8 accommodates Start()'s direct memory writes
-//    (Start writes up to offset ~68 from object start)
+//    (Start writes up to ~obj+528; first DWORD at +8 must be pre-set to 1)
 //
 // Object layout:
-//   +0:  vtable_1 (IRSTopologyOnlineNotify*)  [4 bytes]
-//   +4:  vtable_2 (ITopologyBusEvents*)       [4 bytes]
-//   +8:  m_pad[128] - absorbs Start()'s direct writes
-//   +136: m_refCount (safe from Start)
-//   +140: m_pFTM (IMarshal* for FTM)
-//   +144: m_magic
+//   +0:    vtable_1 (IRSTopologyOnlineNotify*)  [4 bytes]
+//   +4:    vtable_2 (ITopologyBusEvents*)       [4 bytes]
+//   +8:    m_pad[2048] - absorbs Start()'s direct writes
+//            +8+504 (obj+512): canary 0xCAFEBABE  -- near observed write boundary
+//            +8+508 (obj+516): canary 0xDEADDEAD
+//            +8+1020(obj+1028): canary 0xBAADF00D -- overflow guard (~1KB)
+//            +8+2044(obj+2052): canary 0xCAFEBABE -- overflow guard (near end)
+//   +2056: m_refCount (safe from Start; observed writes reach at most ~+528)
+//   +2060: m_pFTM (IMarshal* for FTM)
+//   +2064: m_magic
 // ============================================================
 
 class DualEventSink : public IRSTopologyOnlineNotify, public ITopologyBusEvents
 {
 public:
-    BYTE m_pad[2048];           // +8: absorbs Start()'s writes (observed up to ~+528)
-    LONG m_refCount;            // +136: safe from Start
-    IUnknown* m_pFTM;           // +140: Free Threaded Marshaler
-    DWORD m_magic;              // +144
+    BYTE m_pad[2048];           // +8:    absorbs Start()'s writes (observed up to ~+528)
+    LONG m_refCount;            // +2056: safe from Start
+    IUnknown* m_pFTM;           // +2060: Free Threaded Marshaler
+    DWORD m_magic;              // +2064:
     std::wstring m_label;       // identity for log messages (e.g., "Test/Ethernet", "5069-L320ER/Backplane")
 
     // Cycle detection: track seen addresses to detect when browse repeats
@@ -51,7 +55,8 @@ public:
     ~DualEventSink();
 
     void DumpCounters(const wchar_t* label);
-    void DumpDWords(const wchar_t* label, int count = 32);
+    void DumpDWords(const wchar_t* label, int count = 134);  // 134 DWORDs = 536 bytes, covers observed write max (~+528 from object start)
+    void CheckCanaries(const wchar_t* label);  // verifies sentinel values placed after observed write zone
 
     // --- IUnknown ---
     STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override;
