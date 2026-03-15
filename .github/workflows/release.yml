@@ -1,10 +1,9 @@
-name: Build
+name: Release
 
 on:
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    tags:
+      - 'v*'
 
 jobs:
   build-cpp:
@@ -16,18 +15,18 @@ jobs:
       - name: Add MSBuild to PATH
         uses: microsoft/setup-msbuild@v2
 
-      - name: Build RSLinxBrowse (Release|Win32)
-        run: msbuild RSLinxBrowse\RSLinxBrowse.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /verbosity:minimal
-
       - name: Build RSLinxHook (Release|Win32)
         run: msbuild RSLinxHook\RSLinxHook.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /verbosity:minimal
 
+      - name: Build RSLinxBrowse (Release|Win32)
+        run: msbuild RSLinxBrowse\RSLinxBrowse.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:PlatformToolset=v143 /verbosity:minimal
+
       - name: Collect binaries
+        shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path Release | Out-Null
           Copy-Item RSLinxBrowse\Release\RSLinxBrowse.exe Release\
           Copy-Item RSLinxHook\Release\RSLinxHook.dll Release\
-        shell: pwsh
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -48,9 +47,6 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Build RSLinxViewer
-        run: dotnet build RSLinxViewer\RSLinxViewer.csproj -c Release
-
       - name: Publish self-contained x86
         run: dotnet publish RSLinxViewer\RSLinxViewer.csproj -r win-x86 --self-contained -c Release -o publish
 
@@ -59,3 +55,34 @@ jobs:
         with:
           name: rslinxviewer
           path: publish/
+
+  release:
+    name: Create GitHub Release
+    needs: [build-cpp, build-viewer]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download C++ binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: cpp-binaries
+          path: release-assets/
+
+      - name: Download RSLinxViewer
+        uses: actions/download-artifact@v4
+        with:
+          name: rslinxviewer
+          path: release-assets/viewer/
+
+      - name: Zip RSLinxViewer
+        run: zip -r release-assets/RSLinxViewer-${{ github.ref_name }}-win-x86.zip release-assets/viewer/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-assets/RSLinxBrowse.exe
+            release-assets/RSLinxHook.dll
+            release-assets/RSLinxViewer-${{ github.ref_name }}-win-x86.zip
