@@ -4,15 +4,15 @@ using System.Text;
 namespace RSLinxViewer;
 
 /// <summary>
-/// Bidirectional named pipe server for RSLinxHook.dll communication.
+/// Bidirectional named pipe client for RSLinxHook.dll communication.
 /// Protocol: UTF-8, line-based with type prefix:
 ///
-/// Server → Hook (after connection):
+/// Client → Hook (after connection):
 ///   C|KEY=VALUE  — config line
 ///   C|END        — config complete, hook proceeds
 ///   STOP         — stop signal (on Ctrl+C)
 ///
-/// Hook → Server:
+/// Hook → Client:
 ///   L|text       — log line
 ///   S|t|i|e      — status (total|identified|events)
 ///   X|BEGIN       — start of topology XML block
@@ -20,12 +20,12 @@ namespace RSLinxViewer;
 ///   X|END        — end of topology XML block
 ///   D|           — done signal
 /// </summary>
-sealed class PipeServer : IDisposable
+sealed class PipeClient : IDisposable
 {
     const string PipeName = "RSLinxHook";
     const int MaxLogLines = 200;
 
-    readonly NamedPipeServerStream _pipe;
+    readonly NamedPipeClientStream _pipe;
     readonly object _lock = new();
 
     readonly List<string> _logLines = new(MaxLogLines);
@@ -39,33 +39,29 @@ sealed class PipeServer : IDisposable
     public bool IsConnected => _connected;
     public bool IsDone => _done;
 
-    public PipeServer()
+    public PipeClient()
     {
-        _pipe = new NamedPipeServerStream(
+        _pipe = new NamedPipeClientStream(
+            ".",
             PipeName,
             PipeDirection.InOut,
-            1,
-            PipeTransmissionMode.Byte,
-            PipeOptions.None,
-            4096,
-            4096);
+            PipeOptions.None);
     }
 
     /// <summary>
-    /// Wait for hook DLL to connect. Cancellation closes the pipe to unblock.
+    /// Attempt to connect to the hook DLL's pipe server within the given timeout.
+    /// Returns true if connected, false on timeout or cancellation.
     /// </summary>
-    public async Task WaitForConnectionAsync(CancellationToken ct)
+    public async Task<bool> TryConnectAsync(int timeoutMs, CancellationToken ct)
     {
-        using var reg = ct.Register(() => { try { _pipe.Close(); } catch { } });
         try
         {
-            await Task.Run(() => _pipe.WaitForConnection());
+            await _pipe.ConnectAsync(timeoutMs, ct);
+            _connected = true;
+            return true;
         }
-        catch (Exception) when (ct.IsCancellationRequested)
-        {
-            throw new OperationCanceledException(ct);
-        }
-        _connected = true;
+        catch (TimeoutException) { return false; }
+        catch (OperationCanceledException) { return false; }
     }
 
     /// <summary>Send config to hook DLL over pipe. Call after connection established.</summary>

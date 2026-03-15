@@ -19,6 +19,39 @@ static bool ExtractAttr(const char* pos, const char* attrName, char* out, int ou
     return true;
 }
 
+// Resolve a <device reference="GUID"/> by finding objectid="GUID" elsewhere in buf.
+// Fills cn and nm from the actual device element. Returns true if found.
+static bool ResolveReference(const char* buf, const char* refDevPos,
+                              char* cn, int cnMax, char* nm, int nmMax)
+{
+    // Extract GUID from reference="..."
+    const char* refAttr = strstr(refDevPos, "reference=\"");
+    if (!refAttr || refAttr > refDevPos + 200) return false;
+    refAttr += 11; // skip 'reference="'
+    const char* refEnd = strchr(refAttr, '"');
+    if (!refEnd) return false;
+    int guidLen = (int)(refEnd - refAttr);
+    if (guidLen < 1 || guidLen >= 120) return false;
+
+    // Build: objectid="GUID"
+    char oidPattern[140];
+    memcpy(oidPattern, "objectid=\"", 10);
+    memcpy(oidPattern + 10, refAttr, guidLen);
+    oidPattern[10 + guidLen] = '"';
+    oidPattern[11 + guidLen] = '\0';
+
+    const char* found = strstr(buf, oidPattern);
+    if (!found) return false;
+
+    // Walk back to the '<' that starts the <device> element
+    const char* devStart = found;
+    while (devStart > buf && *devStart != '<') devStart--;
+
+    ExtractAttr(devStart, "classname", cn, cnMax);
+    ExtractAttr(devStart, "name", nm, nmMax);
+    return (*cn != '\0' || *nm != '\0');
+}
+
 // ============================================================
 // TopologyXML globals
 // ============================================================
@@ -205,15 +238,18 @@ QueryResult QueryXMLForPath(const wchar_t* xmlFile,
     // Find <device> within 300 bytes of slot address element
     char* pos4 = strstr(pos3, "<device ");
     if (!pos4 || pos4 > pos3 + 300) return result;
-    if (strncmp(pos4 + 8, "reference", 9) == 0)
-    {
-        pos4 = strstr(pos4 + 1, "<device ");
-        if (!pos4 || pos4 > pos3 + 500) return result;
-    }
 
     char cn[256] = {}, nm[256] = {};
-    ExtractAttr(pos4, "classname", cn, sizeof(cn));
-    ExtractAttr(pos4, "name", nm, sizeof(nm));
+    if (strncmp(pos4 + 8, "reference", 9) == 0)
+    {
+        if (!ResolveReference(buf, pos4, cn, sizeof(cn), nm, sizeof(nm)))
+            return result;
+    }
+    else
+    {
+        ExtractAttr(pos4, "classname", cn, sizeof(cn));
+        ExtractAttr(pos4, "name", nm, sizeof(nm));
+    }
 
     result.found = true;
     result.classname = std::wstring(cn, cn + strlen(cn));
@@ -308,14 +344,14 @@ void PopulateQueryCache(const wchar_t* xmlFile)
                 // Find <device> within 200 bytes of this slot address
                 char* slotDevPos = strstr(slotPos, "<device ");
                 if (!slotDevPos || slotDevPos > slotPos + 200) { slotSearch = slotPos + 1; continue; }
-                if (strncmp(slotDevPos + 8, "reference", 9) == 0) {
-                    slotDevPos = strstr(slotDevPos + 1, "<device ");
-                    if (!slotDevPos || slotDevPos > slotPos + 300) { slotSearch = slotPos + 1; continue; }
-                }
-
                 char scn[256] = {}, snm[256] = {};
-                ExtractAttr(slotDevPos, "classname", scn, sizeof(scn));
-                ExtractAttr(slotDevPos, "name", snm, sizeof(snm));
+                if (strncmp(slotDevPos + 8, "reference", 9) == 0) {
+                    if (!ResolveReference(buf, slotDevPos, scn, sizeof(scn), snm, sizeof(snm)))
+                    { slotSearch = slotPos + 1; continue; }
+                } else {
+                    ExtractAttr(slotDevPos, "classname", scn, sizeof(scn));
+                    ExtractAttr(slotDevPos, "name", snm, sizeof(snm));
+                }
 
                 // Build cache key: "ip\portName\slot"
                 wchar_t slotKeyBuf[512];

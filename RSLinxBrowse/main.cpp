@@ -53,10 +53,8 @@ static bool TryConnectToPipe(DWORD timeoutMs)
         DWORD err = GetLastError();
         if (err == ERROR_PIPE_BUSY)
             WaitNamedPipeW(L"\\\\.\\pipe\\RSLinxHook", 1000);
-        else if (err == ERROR_FILE_NOT_FOUND)
-            Sleep(200);
         else
-            return false;  // unexpected error
+            Sleep(200);  // NOT_FOUND, or transient state between Disconnect/Accept -- retry
     }
     return false;
 }

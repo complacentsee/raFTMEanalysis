@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text;
 using Spectre.Console;
 using Spectre.Console.Rendering;
@@ -6,14 +7,19 @@ namespace RSLinxViewer;
 
 class Program
 {
+    [DllImport("kernel32.dll")]
+    static extern bool SetConsoleOutputCP(uint cp);
+
     static async Task<int> Main(string[] args)
     {
-        // Parse CLI args: [--driver NAME [IP...]]... [--dll PATH] [--log-dir DIR] [--debug-xml] [--monitor]
+        Console.OutputEncoding = Encoding.UTF8;
+        SetConsoleOutputCP(65001);
+
+        // Parse CLI args: [--driver NAME [IP...]]... [--dll PATH] [--log-dir DIR] [--debug-xml] [--monitor] [--probe]
         var drivers = new List<DriverArg>();
         string? dllPath = null;
         string logDir = @"C:\temp";
         bool debugXml = false;
-        bool monitorMode = false;
         bool probeDispids = false;
 
         for (int i = 0; i < args.Length; i++)
@@ -23,7 +29,6 @@ class Program
             {
                 i++;
                 var drv = new DriverArg { Name = args[i] };
-                // Collect IPs until next flag
                 while (i + 1 < args.Length && !args[i + 1].StartsWith("--"))
                 {
                     i++;
@@ -45,7 +50,7 @@ class Program
             }
             else if (arg == "--monitor")
             {
-                monitorMode = true;
+                // --monitor is accepted for compatibility but viewer always triggers a full browse
             }
             else if (arg == "--probe")
             {
@@ -55,22 +60,15 @@ class Program
 
         if (drivers.Count == 0)
         {
-            AnsiConsole.MarkupLine("[red]Usage:[/] RSLinxViewer --driver NAME [[IP...]] [[--driver NAME2 [[IP...]]]] [[--dll PATH]] [[--debug-xml]] [[--monitor]] [[--probe]]");
+            AnsiConsole.MarkupLine("[red]Usage:[/] RSLinxViewer --driver NAME [[IP...]] [[--driver NAME2 [[IP...]]]] [[--dll PATH]] [[--debug-xml]] [[--probe]]");
             return 1;
         }
 
-        // Resolve DLL path
+        // Resolve DLL path (only needed if injection is required)
         if (dllPath == null)
         {
-            // Look next to our exe
             string exeDir = AppContext.BaseDirectory;
             dllPath = Path.Combine(exeDir, "RSLinxHook.dll");
-        }
-        if (!File.Exists(dllPath))
-        {
-            AnsiConsole.MarkupLine($"[red][[FAIL]][/] RSLinxHook.dll not found at: {Markup.Escape(dllPath)}");
-            AnsiConsole.MarkupLine("[dim]Use --dll PATH to specify location[/]");
-            return 1;
         }
         dllPath = Path.GetFullPath(dllPath);
 
@@ -84,38 +82,9 @@ class Program
         }
         AnsiConsole.MarkupLine($"[green][[OK]][/] RSLinx.exe PID: {pid}");
 
-        // Delete old output files
         TryDelete(Path.Combine(logDir, "hook_log.txt"));
         TryDelete(Path.Combine(logDir, "hook_results.txt"));
 
-        // Create named pipe server BEFORE injection
-        using var pipeServer = new PipeServer();
-        AnsiConsole.MarkupLine("[dim]Pipe server created, injecting DLL...[/]");
-
-        // Eject old DLL if present
-        Injector.EjectDLL(pid, dllPath, msg => AnsiConsole.MarkupLine($"[dim]{Markup.Escape(msg)}[/]"));
-        Thread.Sleep(500);
-
-        // Inject
-        bool injected = Injector.InjectDLL(pid, dllPath, msg =>
-        {
-            if (msg.Contains("[FAIL]"))
-                AnsiConsole.MarkupLine($"[red]{Markup.Escape(msg)}[/]");
-            else if (msg.Contains("[OK]"))
-                AnsiConsole.MarkupLine($"[green]{Markup.Escape(msg)}[/]");
-            else
-                AnsiConsole.MarkupLine($"[dim]{Markup.Escape(msg)}[/]");
-        });
-
-        if (!injected)
-        {
-            AnsiConsole.MarkupLine("[red][[FAIL]][/] DLL injection failed");
-            return 1;
-        }
-
-        AnsiConsole.MarkupLine("[green][[OK]][/] DLL injected, waiting for pipe connection...");
-
-        // Wait for hook to connect to our pipe
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) =>
         {
@@ -123,60 +92,92 @@ class Program
             cts.Cancel();
         };
 
-        try
+        bool reconnect = true;
+        while (reconnect && !cts.IsCancellationRequested)
         {
-            var connectTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, connectTimeout.Token);
-            await pipeServer.WaitForConnectionAsync(linkedCts.Token);
+            reconnect = false;
+            using var pipeClient = new PipeClient();
+
+            // Smart injection: probe first, inject only when hook is not already running
+            AnsiConsole.MarkupLine("[dim]Probing for existing hook...[/]");
+            bool alreadyLoaded = await pipeClient.TryConnectAsync(500, cts.Token);
+
+            if (alreadyLoaded)
+            {
+                AnsiConsole.MarkupLine("[green][[OK]][/] Hook already running - skipping injection");
+            }
+            else
+            {
+                if (!File.Exists(dllPath))
+                {
+                    AnsiConsole.MarkupLine($"[red][[FAIL]][/] RSLinxHook.dll not found at: {Markup.Escape(dllPath)}");
+                    AnsiConsole.MarkupLine("[dim]Use --dll PATH to specify location[/]");
+                    return 1;
+                }
+
+                AnsiConsole.MarkupLine("[dim]Hook not found, injecting DLL...[/]");
+                bool injected = Injector.InjectDLL(pid, dllPath, msg =>
+                {
+                    if (msg.Contains("[FAIL]"))
+                        AnsiConsole.MarkupLine($"[red]{Markup.Escape(msg)}[/]");
+                    else if (msg.Contains("[OK]"))
+                        AnsiConsole.MarkupLine($"[green]{Markup.Escape(msg)}[/]");
+                    else
+                        AnsiConsole.MarkupLine($"[dim]{Markup.Escape(msg)}[/]");
+                });
+
+                if (!injected)
+                {
+                    AnsiConsole.MarkupLine("[red][[FAIL]][/] DLL injection failed");
+                    return 1;
+                }
+
+                AnsiConsole.MarkupLine("[green][[OK]][/] DLL injected, waiting for pipe server...");
+                if (!await pipeClient.TryConnectAsync(10000, cts.Token))
+                {
+                    AnsiConsole.MarkupLine("[red][[FAIL]][/] Hook DLL pipe server did not appear within 10s");
+                    AnsiConsole.MarkupLine("[dim]Ensure RSLinxHook.dll has pipe support compiled in[/]");
+                    Cleanup(pipeClient);
+                    return 1;
+                }
+            }
+
+            AnsiConsole.MarkupLine("[green][[OK]][/] Connected to hook pipe, sending config...");
+
+            try
+            {
+                // Always send inject mode — viewer always triggers a full browse cycle
+                pipeClient.SendConfig(drivers, logDir, debugXml, monitorMode: false, probeDispids);
+            }
+            catch (IOException ex)
+            {
+                AnsiConsole.MarkupLine($"[red][[FAIL]][/] Pipe broken during config send: {Markup.Escape(ex.Message)}");
+                Cleanup(pipeClient);
+                return 1;
+            }
+            AnsiConsole.MarkupLine("[green][[OK]][/] Config sent, starting TUI...");
+            Thread.Sleep(300);
+
+            var readTask = pipeClient.ReadLoopAsync(cts.Token);
+
+            reconnect = await RunLiveDisplay(pipeClient, cts.Token);
+
+            Cleanup(pipeClient);
+            try { await readTask; } catch { }
+
+            if (reconnect)
+                AnsiConsole.MarkupLine("[dim]Re-browsing...[/]");
         }
-        catch (OperationCanceledException) when (!cts.IsCancellationRequested)
-        {
-            AnsiConsole.MarkupLine("[red][[FAIL]][/] Hook DLL did not connect to pipe within 10s");
-            AnsiConsole.MarkupLine("[dim]Ensure RSLinxHook.dll has pipe support compiled in[/]");
-            Cleanup(pid, dllPath, pipeServer);
-            return 1;
-        }
-        catch (OperationCanceledException)
-        {
-            Cleanup(pid, dllPath, pipeServer);
-            return 0;
-        }
-
-        AnsiConsole.MarkupLine("[green][[OK]][/] Hook connected via pipe, sending config...");
-
-        // Send config over pipe (replaces hook_config.txt)
-        try
-        {
-            pipeServer.SendConfig(drivers, logDir, debugXml, monitorMode, probeDispids);
-        }
-        catch (IOException ex)
-        {
-            AnsiConsole.MarkupLine($"[red][[FAIL]][/] Pipe broken during config send: {Markup.Escape(ex.Message)}");
-            Cleanup(pid, dllPath, pipeServer);
-            return 1;
-        }
-        AnsiConsole.MarkupLine("[green][[OK]][/] Config sent, starting TUI...");
-        Thread.Sleep(300); // brief pause so user can see the message
-
-        // Start pipe read loop in background
-        var readTask = pipeServer.ReadLoopAsync(cts.Token);
-
-        // Enter TUI live display
-        await RunLiveDisplay(pipeServer, cts.Token);
-
-        // Cleanup
-        Cleanup(pid, dllPath, pipeServer);
-
-        // Wait for read task
-        try { await readTask; } catch { /* ignore */ }
 
         AnsiConsole.MarkupLine("\n[dim]Exited cleanly.[/]");
         return 0;
     }
 
-    static async Task RunLiveDisplay(PipeServer pipe, CancellationToken ct)
+    /// <summary>Returns true if the user pressed B to request a re-browse.</summary>
+    static async Task<bool> RunLiveDisplay(PipeClient pipe, CancellationToken ct)
     {
         int scrollOffset = 0;
+        bool reconnectRequested = false;
 
         await AnsiConsole.Live(new Text("Initializing..."))
             .AutoClear(true)
@@ -185,9 +186,8 @@ class Program
                 string? lastXml = null;
                 Tree? currentTree = null;
 
-                while (!ct.IsCancellationRequested && !pipe.IsDone)
+                while (!ct.IsCancellationRequested && !reconnectRequested)
                 {
-                    // Handle keyboard input for scrolling
                     while (Console.KeyAvailable)
                     {
                         var key = Console.ReadKey(true);
@@ -208,27 +208,28 @@ class Program
                             case ConsoleKey.Home:
                                 scrollOffset = 0;
                                 break;
+                            case ConsoleKey.B:
+                                reconnectRequested = true;
+                                break;
                         }
                     }
 
-                    // Get latest data from pipe
+                    if (reconnectRequested) break;
+
                     string? xml = pipe.GetLatestXml();
                     var logLines = pipe.GetRecentLog(15);
                     var (total, identified, events) = pipe.GetStatus();
 
-                    // Rebuild tree only when XML changes
                     if (xml != null && xml != lastXml)
                     {
                         lastXml = xml;
                         currentTree = TopologyParser.BuildTree(xml);
                     }
 
-                    // Build layout
-                    var layout = BuildLayout(currentTree, logLines, total, identified, events, pipe.IsConnected, scrollOffset, out var treeViewport);
+                    var layout = BuildLayout(currentTree, logLines, total, identified, events, pipe.IsConnected, pipe.IsDone, scrollOffset, out var treeViewport);
                     ctx.UpdateTarget(layout);
                     ctx.Refresh();
 
-                    // Clamp scroll offset to actual tree height
                     if (treeViewport != null && treeViewport.TotalLines > 0)
                     {
                         int viewportHeight = Math.Max(5, Console.WindowHeight - Math.Min(logLines.Count, 15) - 8);
@@ -251,20 +252,20 @@ class Program
                 var finalLog = pipe.GetRecentLog(15);
                 var finalStatus = pipe.GetStatus();
                 Tree? finalTree = finalXml != null ? TopologyParser.BuildTree(finalXml) : currentTree;
-                var finalLayout = BuildLayout(finalTree, finalLog, finalStatus.total, finalStatus.identified, finalStatus.events, false, 0, out _);
+                var finalLayout = BuildLayout(finalTree, finalLog, finalStatus.total, finalStatus.identified, finalStatus.events, false, true, 0, out _);
                 ctx.UpdateTarget(finalLayout);
                 ctx.Refresh();
             });
+
+        return reconnectRequested;
     }
 
-    static IRenderable BuildLayout(Tree? tree, List<string> logLines, int total, int identified, int events, bool connected, int scrollOffset, out Viewport? viewport)
+    static IRenderable BuildLayout(Tree? tree, List<string> logLines, int total, int identified, int events, bool connected, bool done, int scrollOffset, out Viewport? viewport)
     {
-        // Calculate viewport height for tree (leave room for log panel + status)
         int consoleHeight = Console.WindowHeight;
         int logLines_ = Math.Min(logLines.Count, 15);
         int treeViewportHeight = Math.Max(5, consoleHeight - logLines_ - 8);
 
-        // Tree panel with viewport scrolling
         IRenderable treeContent;
         viewport = null;
         if (tree != null)
@@ -277,7 +278,9 @@ class Program
             treeContent = new Markup("[dim]Waiting for topology data...[/]");
         }
 
-        string scrollHint = scrollOffset > 0 ? $" [dim](line {scrollOffset + 1}, {"\u2191\u2193"} PgUp/PgDn to scroll)[/]" : $" [dim]({"\u2191\u2193"} PgUp/PgDn to scroll)[/]";
+        string scrollHint = scrollOffset > 0
+            ? $" [dim](line {scrollOffset + 1}, \u2191\u2193 PgUp/PgDn)[/]"
+            : $" [dim](\u2191\u2193 PgUp/PgDn)[/]";
         var treePanel = new Panel(treeContent)
         {
             Header = new PanelHeader($"[bold]RSLinx Topology[/]{scrollHint}"),
@@ -285,7 +288,6 @@ class Program
             Expand = true,
         };
 
-        // Log panel
         var logBuilder = new StringBuilder();
         if (logLines.Count == 0)
         {
@@ -307,50 +309,31 @@ class Program
             Expand = true,
         };
 
-        // Status footer
         string status = connected
-            ? $"[green]Connected[/] | {total} total, {identified} identified, {events} events | [dim]Ctrl+C to exit[/]"
-            : $"[red]Disconnected[/] | {total} total, {identified} identified, {events} events";
+            ? $"[green]Browsing[/] | {total} total, {identified} identified, {events} events | [dim]B=re-browse  Ctrl+C=exit[/]"
+            : done
+                ? $"[dim]Done[/] | {total} total, {identified} identified, {events} events | [dim]B=re-browse  Ctrl+C=exit[/]"
+                : $"[red]Disconnected[/] | {total} total, {identified} identified, {events} events | [dim]B=re-browse  Ctrl+C=exit[/]";
 
-        // Combine with rows layout
-        var rows = new Rows(
-            treePanel,
-            logPanel,
-            new Markup(status)
-        );
-
-        return rows;
+        return new Rows(treePanel, logPanel, new Markup(status));
     }
 
     static string FormatLogLine(string line)
     {
         string escaped = Markup.Escape(line);
-
-        // Color-code by tag
-        if (line.Contains("[FAIL]"))
-            return $"[red]{escaped}[/]";
-        if (line.Contains("[OK]"))
-            return $"[green]{escaped}[/]";
-        if (line.Contains("[WARN]"))
-            return $"[yellow]{escaped}[/]";
-        if (line.Contains("[ENUM:") || line.Contains("[BUS:"))
-            return $"[cyan]{escaped}[/]";
-        if (line.Contains("[MONITOR]"))
-            return $"[blue]{escaped}[/]";
-        if (line.Contains("[ENGINE]"))
-            return $"[magenta]{escaped}[/]";
-        if (line.StartsWith("==="))
-            return $"[bold]{escaped}[/]";
-
+        if (line.Contains("[FAIL]"))  return $"[red]{escaped}[/]";
+        if (line.Contains("[OK]"))    return $"[green]{escaped}[/]";
+        if (line.Contains("[WARN]"))  return $"[yellow]{escaped}[/]";
+        if (line.Contains("[ENUM:") || line.Contains("[BUS:")) return $"[cyan]{escaped}[/]";
+        if (line.Contains("[MONITOR]")) return $"[blue]{escaped}[/]";
+        if (line.Contains("[ENGINE]"))  return $"[magenta]{escaped}[/]";
+        if (line.StartsWith("==="))     return $"[bold]{escaped}[/]";
         return $"[dim]{escaped}[/]";
     }
 
-    static void Cleanup(uint pid, string dllPath, PipeServer pipe)
+    static void Cleanup(PipeClient pipe)
     {
-        // Signal hook to stop via pipe
         pipe.SendStop();
-
-        // Wait for hook to finish (pipe disconnect or done signal)
         AnsiConsole.MarkupLine("[dim]Waiting for hook to finish...[/]");
         for (int i = 0; i < 20; i++)
         {
@@ -361,17 +344,11 @@ class Program
                 break;
             }
         }
-
-        // Brief pause for DLL to fully wind down after cleanup
-        Thread.Sleep(500);
-
-        // Eject DLL
-        Injector.EjectDLL(pid, dllPath, _ => { });
     }
 
     static void TryDelete(string path)
     {
-        try { File.Delete(path); } catch { /* ignore */ }
+        try { File.Delete(path); } catch { }
     }
 }
 

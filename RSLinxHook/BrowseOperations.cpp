@@ -1,4 +1,4 @@
-#include "BrowseOperations.h"
+﻿#include "BrowseOperations.h"
 #include "Logging.h"
 #include "SEHHelpers.h"
 #include "EventSink.h"
@@ -48,7 +48,7 @@ void GetEnumeratorStatusSince(int baseline, int& completed, int& total)
 }
 
 // ============================================================
-// GetBusDispatch — fresh bus IDispatch from COM objects on current STA
+// GetBusDispatch  - fresh bus IDispatch from COM objects on current STA
 // ============================================================
 
 IDispatch* GetBusDispatch(const wchar_t* driverName)
@@ -120,7 +120,7 @@ IDispatch* GetBusDispatch(const wchar_t* driverName)
 }
 
 // ============================================================
-// DoBusBrowse — runs on MAIN STA thread
+// DoBusBrowse  - runs on MAIN STA thread
 // ============================================================
 
 HRESULT DoBusBrowse()
@@ -307,7 +307,7 @@ HRESULT DoBusBrowse()
 }
 
 // ============================================================
-// DoBackplaneBrowse — runs on MAIN STA thread (Phase 4b)
+// DoBackplaneBrowse  - runs on MAIN STA thread (Phase 4b)
 // ============================================================
 
 HRESULT DoBackplaneBrowse()
@@ -551,7 +551,7 @@ HRESULT DoBackplaneBrowse()
 }
 
 // ============================================================
-// DoCleanupOnMainSTA — runs on MAIN STA thread
+// DoCleanupOnMainSTA  - runs on MAIN STA thread
 // ============================================================
 
 HRESULT DoCleanupOnMainSTA()
@@ -635,7 +635,7 @@ HRESULT DoCleanupOnMainSTA()
 }
 
 // ============================================================
-// DoMainSTABrowse — runs on the MAIN STA thread
+// DoMainSTABrowse  - runs on the MAIN STA thread
 // ============================================================
 
 HRESULT DoMainSTABrowse()
@@ -747,7 +747,7 @@ HRESULT DoMainSTABrowse()
 
     if (!pBusDisp || !pBusUnk)
     {
-        Log(L"[MAIN-STA] FAIL Could not get bus '%s' — skipping", drv.name.c_str());
+        Log(L"[MAIN-STA] FAIL Could not get bus '%s'  - skipping", drv.name.c_str());
         if (pBusDisp) pBusDisp->Release();
         if (pBusUnk) pBusUnk->Release();
         continue;
@@ -940,7 +940,7 @@ HRESULT DoMainSTABrowse()
 }
 
 // ============================================================
-// RunMonitorLoop — continuous browse mode
+// RunMonitorLoop  - continuous browse mode
 // ============================================================
 
 void RunMonitorLoop(const HookConfig& config, IRSTopologyGlobals* pGlobals, const std::vector<BusInfo>& buses)
@@ -1005,7 +1005,7 @@ void RunMonitorLoop(const HookConfig& config, IRSTopologyGlobals* pGlobals, cons
 
                 if (!busBrowseDone && c.identifiedDevices > 0)
                 {
-                    Log(L"[MONITOR] Devices identified — triggering bus browse");
+                    Log(L"[MONITOR] Devices identified  - triggering bus browse");
                     g_capturedBuses.clear();
                     g_captureBuses = true;
                     HRESULT hrBus = ExecuteOnMainSTA(DoBusBrowse);
@@ -1016,7 +1016,7 @@ void RunMonitorLoop(const HookConfig& config, IRSTopologyGlobals* pGlobals, cons
                 if (busBrowseDone && !backplaneBrowseDone && !g_capturedBuses.empty())
                 {
                     g_captureBuses = false;
-                    Log(L"[MONITOR] Captured %d buses — triggering backplane browse", (int)g_capturedBuses.size());
+                    Log(L"[MONITOR] Captured %d buses  - triggering backplane browse", (int)g_capturedBuses.size());
                     HRESULT hrBP = ExecuteOnMainSTA(DoBackplaneBrowse);
                     Log(L"[MONITOR] Backplane browse: hr=0x%08x", hrBP);
                     backplaneBrowseDone = true;
@@ -1049,7 +1049,7 @@ void RunMonitorLoop(const HookConfig& config, IRSTopologyGlobals* pGlobals, cons
         }
     }
 
-    Log(L"[MONITOR] Stopping — cleaning up");
+    Log(L"[MONITOR] Stopping  - cleaning up");
     Log(L"Tracked: %d connection points, %d enumerators",
         (int)g_connectionPoints.size(), (int)g_enumerators.size());
     HRESULT hrClean = ExecuteOnMainSTA(DoCleanupOnMainSTA);

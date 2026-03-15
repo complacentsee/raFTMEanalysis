@@ -1,4 +1,4 @@
-#include "RSLinxHook_fwd.h"
+﻿#include "RSLinxHook_fwd.h"
 #include "Logging.h"
 #include "ComInterfaces.h"
 #include "Config.h"
@@ -287,7 +287,7 @@ static void AcquireNewBuses(HookConfig& config, IRSTopologyGlobals* pGlobals,
     pProject->Release();
 
     if (buses.empty())
-        Log(L"[FAIL] No buses acquired — cannot browse");
+        Log(L"[FAIL] No buses acquired  - cannot browse");
     else
         Log(L"[OK] Have %d bus(es) total", (int)buses.size());
 }
@@ -321,7 +321,7 @@ static void RunBrowsePhases(HookConfig& config, IRSTopologyGlobals* pGlobals,
                 if (d.name == bus.driverName) { pDrv = &d; break; }
             if (!pDrv || pDrv->ipAddresses.empty())
             {
-                Log(L"  [%s] No IPs to add — using Node Table", bus.driverName.c_str());
+                Log(L"  [%s] No IPs to add  - using Node Table", bus.driverName.c_str());
                 continue;
             }
 
@@ -410,7 +410,7 @@ static void RunBrowsePhases(HookConfig& config, IRSTopologyGlobals* pGlobals,
         Log(L"Phase 2 result: 0x%08x", hrBrowse);
 
         if (FAILED(hrBrowse))
-            Log(L"[WARN] Main-STA browse failed — identification may not trigger");
+            Log(L"[WARN] Main-STA browse failed  - identification may not trigger");
     }
 
     // Monitor mode: enter continuous loop then return
@@ -437,7 +437,7 @@ static void RunBrowsePhases(HookConfig& config, IRSTopologyGlobals* pGlobals,
 
             if (elapsed >= 3000 && EnumeratorsCycledSince(enumBaseline))
             {
-                Log(L"  >> All Phase 2 enumerators cycled at %dms — advancing", elapsed);
+                Log(L"  >> All Phase 2 enumerators cycled at %dms  - advancing", elapsed);
                 break;
             }
 
@@ -467,7 +467,7 @@ static void RunBrowsePhases(HookConfig& config, IRSTopologyGlobals* pGlobals,
                         IsTargetIdentifiedInXML(pollFile.c_str(), allIPs))
                     {
                         targetIdentified = true;
-                        Log(L"  >> Target IPs identified at %ds — exiting Phase 3 early", elapsed / 1000);
+                        Log(L"  >> Target IPs identified at %ds  - exiting Phase 3 early", elapsed / 1000);
                         break;
                     }
                 }
@@ -481,7 +481,7 @@ static void RunBrowsePhases(HookConfig& config, IRSTopologyGlobals* pGlobals,
         }
 
         if (!targetIdentified)
-            Log(L"  Target not identified after 30s — proceeding anyway");
+            Log(L"  Target not identified after 30s  - proceeding anyway");
     }
 
     // Mark Phase 2+3 complete for all drivers
@@ -522,7 +522,7 @@ static void RunBrowsePhases(HookConfig& config, IRSTopologyGlobals* pGlobals,
 
                     if (elapsed >= 2000 && EnumeratorsCycledSince(phase4Baseline))
                     {
-                        Log(L"  >> All bus enumerators cycled at %dms — advancing", elapsed);
+                        Log(L"  >> All bus enumerators cycled at %dms  - advancing", elapsed);
                         break;
                     }
 
@@ -558,7 +558,7 @@ static void RunBrowsePhases(HookConfig& config, IRSTopologyGlobals* pGlobals,
             }
             else
             {
-                Log(L"[WARN] Bus browse failed — skipping Phase 5");
+                Log(L"[WARN] Bus browse failed  - skipping Phase 5");
             }
 
             g_captureBuses = false;
@@ -581,7 +581,7 @@ static void RunBrowsePhases(HookConfig& config, IRSTopologyGlobals* pGlobals,
 
                     if (elapsed >= 2000 && EnumeratorsCycledSince(phase4bBaseline))
                     {
-                        Log(L"  >> All backplane enumerators cycled at %dms — advancing", elapsed);
+                        Log(L"  >> All backplane enumerators cycled at %dms  - advancing", elapsed);
                         break;
                     }
 
@@ -784,7 +784,7 @@ static void HandleQuery(const char* path, IRSTopologyGlobals* pGlobals,
 
         if (needsDriverBrowse || needsBackplane)
         {
-            // Refresh cache from topology — ONE XML write, only when browse ran
+            // Refresh cache from topology  - ONE XML write, only when browse ran
             std::wstring xmlFile = LogPath(config.logDir, L"hook_topo_live.xml");
             if (SaveTopologyXML(pGlobals, xmlFile.c_str()))
             {
@@ -904,7 +904,21 @@ static void HandleSession(HookConfig& config, IRSTopologyGlobals* pGlobals,
     }
     else
     {
-        Log(L"[INFO] Already browsed — skipping phases, entering command loop");
+        Log(L"[INFO] Already browsed  - replaying cached topology to new client");
+        std::wstring pollFile = LogPath(config.logDir, L"hook_topo_poll.xml");
+        DWORD attr = GetFileAttributesW(pollFile.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            TopologyCounts cached = CountDevicesInXML(pollFile.c_str());
+            PipeSendTopology(pollFile.c_str());
+            PipeSendStatus(cached.totalDevices, cached.identifiedDevices, (int)g_discoveredDevices.size());
+            Log(L"[INFO] Replayed cached topology: %d devices, %d identified",
+                cached.totalDevices, cached.identifiedDevices);
+        }
+        else
+        {
+            Log(L"[WARN] No cached topology at %s  - client will get empty result", pollFile.c_str());
+        }
     }
 
     // Signal end of initial browse to CLI

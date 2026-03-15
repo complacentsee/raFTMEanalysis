@@ -211,7 +211,13 @@ void TryEngineHotLoad(const wchar_t* driverNameW)
     typedef void* (__thiscall *pfnGetDevice)(void* thisPtr, int index);
 
     char* pBase = (char*)pCDriver;
-    void** vtable = *(void***)pBase;
+    void** vtable = nullptr;
+    __try { vtable = *(void***)pBase; }
+    __except(EXCEPTION_EXECUTE_HANDLER) {
+        Log(L"[ENGINE] vtable fetch crashed -- driver object not ready, skipping hot-load");
+        return;
+    }
+    if (!vtable) { Log(L"[ENGINE] vtable is null -- skipping hot-load"); return; }
 
     int deviceCountBefore = -1;
     __try {
