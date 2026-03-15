@@ -45,7 +45,7 @@ sealed class PipeClient : IDisposable
             ".",
             PipeName,
             PipeDirection.InOut,
-            PipeOptions.None);
+            PipeOptions.Asynchronous);
     }
 
     /// <summary>
@@ -84,6 +84,18 @@ sealed class PipeClient : IDisposable
         sb.AppendLine("C|END");
         byte[] bytes = Encoding.UTF8.GetBytes(sb.ToString());
         _pipe.Write(bytes, 0, bytes.Length);
+    }
+
+    /// <summary>Send re-browse command to hook DLL.</summary>
+    public void SendBrowse()
+    {
+        lock (_lock) { _done = false; }
+        try
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes("B|\n");
+            _pipe.Write(bytes, 0, bytes.Length);
+        }
+        catch { /* pipe may already be closed */ }
     }
 
     /// <summary>Send stop signal to hook DLL.</summary>
@@ -176,8 +188,8 @@ sealed class PipeClient : IDisposable
                 }
                 else if (line.StartsWith("D|"))
                 {
-                    _done = true;
-                    break;
+                    lock (_lock) { _done = true; }
+                    // session continues — pipe stays open for B|/STOP
                 }
             }
 

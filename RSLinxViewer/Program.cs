@@ -92,92 +92,82 @@ class Program
             cts.Cancel();
         };
 
-        bool reconnect = true;
-        while (reconnect && !cts.IsCancellationRequested)
+        using var pipeClient = new PipeClient();
+
+        // Smart injection: probe first, inject only when hook is not already running
+        AnsiConsole.MarkupLine("[dim]Probing for existing hook...[/]");
+        bool alreadyLoaded = await pipeClient.TryConnectAsync(500, cts.Token);
+
+        if (alreadyLoaded)
         {
-            reconnect = false;
-            using var pipeClient = new PipeClient();
-
-            // Smart injection: probe first, inject only when hook is not already running
-            AnsiConsole.MarkupLine("[dim]Probing for existing hook...[/]");
-            bool alreadyLoaded = await pipeClient.TryConnectAsync(500, cts.Token);
-
-            if (alreadyLoaded)
+            AnsiConsole.MarkupLine("[green][[OK]][/] Hook already running - skipping injection");
+        }
+        else
+        {
+            if (!File.Exists(dllPath))
             {
-                AnsiConsole.MarkupLine("[green][[OK]][/] Hook already running - skipping injection");
-            }
-            else
-            {
-                if (!File.Exists(dllPath))
-                {
-                    AnsiConsole.MarkupLine($"[red][[FAIL]][/] RSLinxHook.dll not found at: {Markup.Escape(dllPath)}");
-                    AnsiConsole.MarkupLine("[dim]Use --dll PATH to specify location[/]");
-                    return 1;
-                }
-
-                AnsiConsole.MarkupLine("[dim]Hook not found, injecting DLL...[/]");
-                bool injected = Injector.InjectDLL(pid, dllPath, msg =>
-                {
-                    if (msg.Contains("[FAIL]"))
-                        AnsiConsole.MarkupLine($"[red]{Markup.Escape(msg)}[/]");
-                    else if (msg.Contains("[OK]"))
-                        AnsiConsole.MarkupLine($"[green]{Markup.Escape(msg)}[/]");
-                    else
-                        AnsiConsole.MarkupLine($"[dim]{Markup.Escape(msg)}[/]");
-                });
-
-                if (!injected)
-                {
-                    AnsiConsole.MarkupLine("[red][[FAIL]][/] DLL injection failed");
-                    return 1;
-                }
-
-                AnsiConsole.MarkupLine("[green][[OK]][/] DLL injected, waiting for pipe server...");
-                if (!await pipeClient.TryConnectAsync(10000, cts.Token))
-                {
-                    AnsiConsole.MarkupLine("[red][[FAIL]][/] Hook DLL pipe server did not appear within 10s");
-                    AnsiConsole.MarkupLine("[dim]Ensure RSLinxHook.dll has pipe support compiled in[/]");
-                    Cleanup(pipeClient);
-                    return 1;
-                }
+                AnsiConsole.MarkupLine($"[red][[FAIL]][/] RSLinxHook.dll not found at: {Markup.Escape(dllPath)}");
+                AnsiConsole.MarkupLine("[dim]Use --dll PATH to specify location[/]");
+                return 1;
             }
 
-            AnsiConsole.MarkupLine("[green][[OK]][/] Connected to hook pipe, sending config...");
+            AnsiConsole.MarkupLine("[dim]Hook not found, injecting DLL...[/]");
+            bool injected = Injector.InjectDLL(pid, dllPath, msg =>
+            {
+                if (msg.Contains("[FAIL]"))
+                    AnsiConsole.MarkupLine($"[red]{Markup.Escape(msg)}[/]");
+                else if (msg.Contains("[OK]"))
+                    AnsiConsole.MarkupLine($"[green]{Markup.Escape(msg)}[/]");
+                else
+                    AnsiConsole.MarkupLine($"[dim]{Markup.Escape(msg)}[/]");
+            });
 
-            try
+            if (!injected)
             {
-                // Always send inject mode — viewer always triggers a full browse cycle
-                pipeClient.SendConfig(drivers, logDir, debugXml, monitorMode: false, probeDispids);
+                AnsiConsole.MarkupLine("[red][[FAIL]][/] DLL injection failed");
+                return 1;
             }
-            catch (IOException ex)
+
+            AnsiConsole.MarkupLine("[green][[OK]][/] DLL injected, waiting for pipe server...");
+            if (!await pipeClient.TryConnectAsync(10000, cts.Token))
             {
-                AnsiConsole.MarkupLine($"[red][[FAIL]][/] Pipe broken during config send: {Markup.Escape(ex.Message)}");
+                AnsiConsole.MarkupLine("[red][[FAIL]][/] Hook DLL pipe server did not appear within 10s");
+                AnsiConsole.MarkupLine("[dim]Ensure RSLinxHook.dll has pipe support compiled in[/]");
                 Cleanup(pipeClient);
                 return 1;
             }
-            AnsiConsole.MarkupLine("[green][[OK]][/] Config sent, starting TUI...");
-            Thread.Sleep(300);
-
-            var readTask = pipeClient.ReadLoopAsync(cts.Token);
-
-            reconnect = await RunLiveDisplay(pipeClient, cts.Token);
-
-            Cleanup(pipeClient);
-            try { await readTask; } catch { }
-
-            if (reconnect)
-                AnsiConsole.MarkupLine("[dim]Re-browsing...[/]");
         }
+
+        AnsiConsole.MarkupLine("[green][[OK]][/] Connected to hook pipe, sending config...");
+
+        try
+        {
+            // Always send inject mode — viewer always triggers a full browse cycle
+            pipeClient.SendConfig(drivers, logDir, debugXml, monitorMode: false, probeDispids);
+        }
+        catch (IOException ex)
+        {
+            AnsiConsole.MarkupLine($"[red][[FAIL]][/] Pipe broken during config send: {Markup.Escape(ex.Message)}");
+            Cleanup(pipeClient);
+            return 1;
+        }
+        AnsiConsole.MarkupLine("[green][[OK]][/] Config sent, starting TUI...");
+        Thread.Sleep(300);
+
+        var readTask = pipeClient.ReadLoopAsync(cts.Token);
+
+        await RunLiveDisplay(pipeClient, cts.Token);
+
+        Cleanup(pipeClient);
+        try { await readTask; } catch { }
 
         AnsiConsole.MarkupLine("\n[dim]Exited cleanly.[/]");
         return 0;
     }
 
-    /// <summary>Returns true if the user pressed B to request a re-browse.</summary>
-    static async Task<bool> RunLiveDisplay(PipeClient pipe, CancellationToken ct)
+    static async Task RunLiveDisplay(PipeClient pipe, CancellationToken ct)
     {
         int scrollOffset = 0;
-        bool reconnectRequested = false;
 
         await AnsiConsole.Live(new Text("Initializing..."))
             .AutoClear(true)
@@ -186,7 +176,7 @@ class Program
                 string? lastXml = null;
                 Tree? currentTree = null;
 
-                while (!ct.IsCancellationRequested && !reconnectRequested)
+                while (!ct.IsCancellationRequested)
                 {
                     while (Console.KeyAvailable)
                     {
@@ -209,12 +199,10 @@ class Program
                                 scrollOffset = 0;
                                 break;
                             case ConsoleKey.B:
-                                reconnectRequested = true;
+                                pipe.SendBrowse();
                                 break;
                         }
                     }
-
-                    if (reconnectRequested) break;
 
                     string? xml = pipe.GetLatestXml();
                     var logLines = pipe.GetRecentLog(15);
@@ -256,8 +244,6 @@ class Program
                 ctx.UpdateTarget(finalLayout);
                 ctx.Refresh();
             });
-
-        return reconnectRequested;
     }
 
     static IRenderable BuildLayout(Tree? tree, List<string> logLines, int total, int identified, int events, bool connected, bool done, int scrollOffset, out Viewport? viewport)
@@ -309,11 +295,11 @@ class Program
             Expand = true,
         };
 
-        string status = connected
-            ? $"[green]Browsing[/] | {total} total, {identified} identified, {events} events | [dim]B=re-browse  Ctrl+C=exit[/]"
+        string status = !connected
+            ? $"[red]Disconnected[/] | {total} total, {identified} identified, {events} events | [dim]B=re-browse  Ctrl+C=exit[/]"
             : done
                 ? $"[dim]Done[/] | {total} total, {identified} identified, {events} events | [dim]B=re-browse  Ctrl+C=exit[/]"
-                : $"[red]Disconnected[/] | {total} total, {identified} identified, {events} events | [dim]B=re-browse  Ctrl+C=exit[/]";
+                : $"[green]Browsing[/] | {total} total, {identified} identified, {events} events | [dim]B=re-browse  Ctrl+C=exit[/]";
 
         return new Rows(treePanel, logPanel, new Markup(status));
     }

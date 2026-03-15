@@ -819,6 +819,27 @@ static void HandleQuery(const char* path, IRSTopologyGlobals* pGlobals,
 }
 
 // ============================================================
+// SafeRunBrowsePhases
+// Thin SEH wrapper — must have no local C++ objects with dtors.
+// Returns true on success, false if an SEH exception was caught.
+// ============================================================
+
+static bool SafeRunBrowsePhases(HookConfig& config, IRSTopologyGlobals* pGlobals,
+                                 std::vector<BusInfo>& buses)
+{
+    __try
+    {
+        RunBrowsePhases(config, pGlobals, buses);
+        return true;
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER)
+    {
+        Log(L"[PIPE] RunBrowsePhases SEH exception: 0x%08x", GetExceptionCode());
+        return false;
+    }
+}
+
+// ============================================================
 // HandleSession
 // Manage one connected CLI client: read config, acquire buses,
 // run browse if needed, enter command loop.
@@ -924,7 +945,7 @@ static void HandleSession(HookConfig& config, IRSTopologyGlobals* pGlobals,
     // Signal end of initial browse to CLI
     PipeSend("D|\n", 3);
 
-    // Command loop: handle Q| queries and STOP
+    // Command loop: handle Q| queries, B| re-browse, and STOP
     char line[512];
     while (g_pipeConnected && !g_shouldStop)
     {
@@ -933,6 +954,13 @@ static void HandleSession(HookConfig& config, IRSTopologyGlobals* pGlobals,
         if (line[0] == 'Q' && line[1] == '|')
         {
             HandleQuery(line + 2, pGlobals, config, buses);
+        }
+        else if (strcmp(line, "B|") == 0)
+        {
+            Log(L"[PIPE] Re-browse requested by client");
+            bool ok = SafeRunBrowsePhases(config, pGlobals, buses);
+            PipeSend("D|\n", 3);
+            if (!ok) break; // COM state likely corrupt — disconnect client
         }
     }
 }
