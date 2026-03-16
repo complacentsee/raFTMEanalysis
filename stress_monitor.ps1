@@ -1,4 +1,4 @@
-# RSLinxHook Stress Test - 50 cycle kill/clear/browse/query
+# RSLinxHook Monitor Mode Stress Test - 20 cycles, --monitor flag
 #
 # CONFIGURATION: edit the variables below for your testbench before running.
 #
@@ -9,6 +9,12 @@
 #
 # Expected result format: "FOUND|<classname>" or "NOTFOUND"
 # Backplane paths: "$TARGET_IP\Backplane\<slot>"
+#
+# PURPOSE: Validates the --monitor code path across N runs. Monitor mode skips
+# DoEngineHotLoad and node-table/harmony-file changes, browsing the existing
+# driver in-place. A full cold-start setup populates the node table first so
+# the driver is present when monitor mode runs. Verify via hook_log.txt that
+# no "hot-load" lines appear during the monitor-mode cycles.
 
 # ---- TESTBENCH CONFIGURATION ----
 $TARGET_IPS  = @("192.0.2.1", "192.0.2.2")   # replace with your device IPs
@@ -30,13 +36,13 @@ $QUERIES = [ordered]@{
 }
 # ---- END CONFIGURATION ----
 
-$CYCLES      = 50
+$CYCLES      = 20
 $BROWSE_EXE  = Join-Path $PSScriptRoot "RSLinxBrowse\Release\RSLinxBrowse.exe"
 $HARMONY_HRC = "C:\Program Files (x86)\Rockwell Software\RSCommon\Harmony.hrc"
 $HARMONY_RSH = "C:\Program Files (x86)\Rockwell Software\RSCommon\Harmony.rsh"
 $NODE_TABLE  = "HKLM:\SOFTWARE\WOW6432Node\Rockwell Software\RSLinx\Drivers\AB_ETH\AB_ETH-1\Node Table"
 $LOGDIR      = "C:\temp"
-$LOGFILE     = "C:\temp\stress_results.txt"
+$LOGFILE     = "C:\temp\stress_monitor_results.txt"
 $SVC_NAME    = "RSLinx"   # RSLinx Classic service name
 
 $totalPass = 0
@@ -94,53 +100,82 @@ $qExpects = @($QUERIES.Values)
 
 # Clear log
 if (Test-Path $LOGFILE) { Remove-Item $LOGFILE -Force }
-Log "=== RSLinxHook Stress Test: $CYCLES cycles, $($qPaths.Count) checks each ==="
+Log "=== RSLinxHook Monitor Mode Stress Test: $CYCLES cycles, $($qPaths.Count) checks each ==="
 Log "Target: $($TARGET_IPS -join ', ')  Driver: $DRIVER_NAME  Service: $SVC_NAME"
 Log ""
 
+# ---- ONE-TIME SETUP: full cold start + inject browse to populate node table ----
+Log "============================================================"
+Log "SETUP: Cold start RSLinx and inject browse to populate node table"
+Log "       (required so --monitor can find the driver without writing)"
+Log "============================================================"
+
+Log "  [setup-1] Stopping RSLinx service..."
+Stop-Service -Name $SVC_NAME -Force -ErrorAction SilentlyContinue
+$svc = Get-Service -Name $SVC_NAME
+if ($svc.Status -ne "Stopped") {
+    Log "      WARN: service still $($svc.Status) after Stop-Service, waiting 5s..."
+    Start-Sleep -Seconds 5
+}
+Stop-Process -Name "RSOBSERV" -Force -ErrorAction SilentlyContinue
+Log "      Service stopped."
+
+Log "  [setup-2] Removing harmony files and clearing node table..."
+DeleteIfExists $HARMONY_HRC
+DeleteIfExists $HARMONY_RSH
+ClearNodeTable $NODE_TABLE
+
+Log "  [setup-3] Starting RSLinx service..."
+Start-Service -Name $SVC_NAME -ErrorAction SilentlyContinue
+$svc = Get-Service -Name $SVC_NAME
+if ($svc.Status -ne "Running") {
+    Log "FATAL: Service failed to start ($($svc.Status)) -- cannot run test"
+    exit 1
+}
+Start-Sleep -Seconds 8
+$rslinxProc = Get-Process -Name "RSLinx" -ErrorAction SilentlyContinue
+Log "      Service running, PID: $($rslinxProc.Id)"
+
+Log "  [setup-4] Running initial inject browse (populates node table for monitor mode)..."
+$t0        = Get-Date
+$ipArgs    = $TARGET_IPS | ForEach-Object { "--ip"; $_ }
+$browseOut = & $BROWSE_EXE --driver $DRIVER_NAME @ipArgs --logdir $LOGDIR 2>&1
+$browseS   = [int]((Get-Date) - $t0).TotalSeconds
+$browseOk  = $browseOut | Where-Object { $_ -match 'Browse complete' }
+$devLine   = ($browseOut | Where-Object { $_ -match 'DEVICES_IDENTIFIED' } | Select-Object -First 1) -replace '^\s+',''
+
+if ($browseOk -and $LASTEXITCODE -eq 0) {
+    Log "      Initial browse OK in ${browseS}s -- $devLine"
+} else {
+    $tail = ($browseOut | Select-Object -Last 4) -join " | "
+    Log "FATAL: Initial browse FAILED after ${browseS}s (exit=$LASTEXITCODE): $tail"
+    exit 1
+}
+Log ""
+
+# ---- MAIN LOOP: monitor mode against the same running RSLinx process ----
 for ($cycle = 1; $cycle -le $CYCLES; $cycle++) {
     Log "------------------------------------------------------------"
     Log "CYCLE $cycle / $CYCLES   (running total: $totalPass pass, $totalFail fail)"
     Log "------------------------------------------------------------"
 
-    # --- Step 1: Stop RSLinx service (synchronous) ---
-    Log "  [1] Stopping RSLinx service..."
-    Stop-Service -Name $SVC_NAME -Force -ErrorAction SilentlyContinue
-    $svc = Get-Service -Name $SVC_NAME
-    if ($svc.Status -ne "Stopped") {
-        Log "      WARN: service still $($svc.Status) after Stop-Service, waiting 5s..."
-        Start-Sleep -Seconds 5
-    }
-    # Also kill RSOBSERV if hanging around
-    Stop-Process -Name "RSOBSERV" -Force -ErrorAction SilentlyContinue
-    Log "      Service stopped."
-
-    # --- Step 2: Delete harmony files and clear node table ---
-    Log "  [2] Removing harmony files and clearing node table..."
-    DeleteIfExists $HARMONY_HRC
-    DeleteIfExists $HARMONY_RSH
-    ClearNodeTable $NODE_TABLE
-
-    # --- Step 3: Start RSLinx service (synchronous) ---
-    Log "  [3] Starting RSLinx service..."
-    Start-Service -Name $SVC_NAME -ErrorAction SilentlyContinue
-    $svc = Get-Service -Name $SVC_NAME
-    if ($svc.Status -ne "Running") {
-        Log "  SKIP: Service failed to start ($($svc.Status)) -- $($qPaths.Count) failures"
+    # --- Step 1: Verify RSLinx is still running ---
+    Log "  [1] Verifying RSLinx is still running..."
+    $svc = Get-Service -Name $SVC_NAME -ErrorAction SilentlyContinue
+    if (-not $svc -or $svc.Status -ne "Running") {
+        Log "  ABORT: RSLinx service is no longer running ($($svc.Status)) -- monitor-mode COM path may have caused a crash"
         $totalFail += $qPaths.Count
         ShowProgress $cycle $CYCLES $totalPass $totalFail
-        continue
+        break
     }
-    # Wait for RSLinx COM objects to be ready (8s prevents hot-load race on fresh start)
-    Start-Sleep -Seconds 8
     $rslinxProc = Get-Process -Name "RSLinx" -ErrorAction SilentlyContinue
-    Log "      Service running, PID: $($rslinxProc.Id)"
+    Log "      RSLinx running, PID: $($rslinxProc.Id)"
 
-    # --- Step 4: Inject + browse ---
-    Log "  [4] Running browse (fresh injection)..."
+    # --- Step 2: Monitor-mode browse (skips DoEngineHotLoad and node-table writes) ---
+    Log "  [2] Running --monitor browse (no node-table or harmony-file changes)..."
     $t0        = Get-Date
     $ipArgs    = $TARGET_IPS | ForEach-Object { "--ip"; $_ }
-    $browseOut = & $BROWSE_EXE --driver $DRIVER_NAME @ipArgs --logdir $LOGDIR 2>&1
+    $browseOut = & $BROWSE_EXE --monitor --driver $DRIVER_NAME @ipArgs --logdir $LOGDIR 2>&1
     $browseS   = [int]((Get-Date) - $t0).TotalSeconds
     $browseOk  = $browseOut | Where-Object { $_ -match 'Browse complete' }
     $devLine   = ($browseOut | Where-Object { $_ -match 'DEVICES_IDENTIFIED' } | Select-Object -First 1) -replace '^\s+',''
@@ -151,7 +186,6 @@ for ($cycle = 1; $cycle -le $CYCLES; $cycle++) {
     } else {
         $tail = ($browseOut | Select-Object -Last 4) -join " | "
         Log "      Browse FAILED after ${browseS}s (exit=$browseExitCode): $tail"
-        # Capture hook log for diagnosis
         if (Test-Path "C:\temp\hook_log.txt") {
             $hookTail = Get-Content "C:\temp\hook_log.txt" -Tail 15
             Log "      HOOK LOG (last 15 lines):"
@@ -162,8 +196,8 @@ for ($cycle = 1; $cycle -le $CYCLES; $cycle++) {
         continue
     }
 
-    # --- Step 5: Run queries ---
-    Log "  [5] Querying ($($qPaths.Count) checks)..."
+    # --- Step 3: Run queries ---
+    Log "  [3] Querying ($($qPaths.Count) checks)..."
     $cycleOk = $true
 
     for ($qi = 0; $qi -lt $qPaths.Count; $qi++) {
@@ -203,7 +237,7 @@ for ($cycle = 1; $cycle -le $CYCLES; $cycle++) {
 $total  = $totalPass + $totalFail
 $pctStr = if ($total -gt 0) { "$([math]::Round(100.0 * $totalFail / $total, 1))" + "%" } else { "n/a" }
 Log "============================================================"
-Log "STRESS TEST COMPLETE: $CYCLES cycles, $total total checks"
+Log "MONITOR MODE STRESS TEST COMPLETE: $CYCLES cycles, $total total checks"
 Log "  PASS: $totalPass"
 Log "  FAIL: $totalFail  ($pctStr failure rate)"
 if ($totalFail -eq 0) {
@@ -211,5 +245,6 @@ if ($totalFail -eq 0) {
 } else {
     Log "  RESULT: FAILURES DETECTED -- review log above"
 }
+Log "  NOTE: verify C:\temp\hook_log.txt contains no 'hot-load' lines (monitor must skip DoEngineHotLoad)"
 Log "  Log: $LOGFILE"
 Log "============================================================"
