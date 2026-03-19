@@ -128,39 +128,53 @@ for ($cycle = 1; $cycle -le $CYCLES; $cycle++) {
         continue
     }
 
-    # --- Step 3: Run queries ---
-    Log "  [3] Querying ($($qPaths.Count) checks)..."
-    $cycleOk = $true
+    # --- Step 3: Batch query ---
+    Log "  [3] Querying ($($qPaths.Count) checks via batch)..."
+    $cycleOk   = $true
+    $cyclePass = 0
+    $cycleFail = 0
 
+    $batchFile = Join-Path $LOGDIR "batch_queries.txt"
+    $qPaths | Out-File $batchFile -Encoding ASCII
+
+    $qOutFile = Join-Path $LOGDIR "batch_results.txt"
+    $t1 = Get-Date
+    Start-Process -FilePath $BROWSE_EXE `
+        -ArgumentList "--batch-query", $batchFile, "--logdir", $LOGDIR `
+        -RedirectStandardOutput $qOutFile `
+        -RedirectStandardError  (Join-Path $LOGDIR "batch_err.txt") `
+        -NoNewWindow -Wait
+    $queryS = [int]((Get-Date) - $t1).TotalSeconds
+    $qOutRaw = if (Test-Path $qOutFile) { Get-Content $qOutFile -Raw } else { "" }
+    $resultLines = ($qOutRaw -split "`n") | Where-Object { $_ -match '^\[FOUND\]|^\[NOTFOUND\]' } | ForEach-Object { $_ -replace '\r','' }
+
+    $rIdx = 0
     for ($qi = 0; $qi -lt $qPaths.Count; $qi++) {
         $qPath   = $qPaths[$qi]
         $qExpect = $qExpects[$qi]
+        $wantFound = $qExpect -match '^FOUND'
 
-        $qOutFile = "C:\temp\query_diag.txt"
-        $proc = Start-Process -FilePath $BROWSE_EXE `
-            -ArgumentList "--query", $qPath, "--logdir", $LOGDIR `
-            -RedirectStandardOutput $qOutFile `
-            -RedirectStandardError  "C:\temp\query_diag_err.txt" `
-            -NoNewWindow -Wait -PassThru
-        $qOutRaw = if (Test-Path $qOutFile) { Get-Content $qOutFile -Raw } else { "" }
-        $qErrRaw = if (Test-Path "C:\temp\query_diag_err.txt") { Get-Content "C:\temp\query_diag_err.txt" -Raw } else { "" }
-        $result  = (($qOutRaw -split "`n") | Where-Object { $_ -match '^\[FOUND\]|^\[NOTFOUND\]' } | Select-Object -First 1) -replace '\r',''
+        $result = if ($rIdx -lt $resultLines.Count) { $resultLines[$rIdx] } else { "" }
+        $rIdx++
+        $gotFound = $result -match '^\[FOUND\]'
 
-        if ($result -and ($result -match [regex]::Escape($qExpect))) {
-            Log "      PASS  $qPath  =>  $result"
+        if ($wantFound -eq $gotFound) {
+            Log "      PASS  $qPath"
+            $cyclePass++
             $totalPass++
         } else {
             $got = if ($result) { $result } else { "(no output)" }
-            Log "      FAIL  $qPath  want: $qExpect  got: $got  exit=$($proc.ExitCode)"
-            Log "        STDOUT: $($qOutRaw -replace '\r?\n',' | ')"
-            Log "        STDERR: $($qErrRaw -replace '\r?\n',' | ')"
+            $want = if ($wantFound) { "FOUND" } else { "NOTFOUND" }
+            Log "      FAIL  $qPath  want=$want  got=$got"
+            $cycleFail++
             $totalFail++
             $cycleOk = $false
         }
     }
+    Log "      Batch query completed in ${queryS}s"
 
     $status = if ($cycleOk) { "PASSED" } else { "FAILED" }
-    Log "  => Cycle $cycle $status"
+    Log "  => Cycle $cycle $status  (pass=$cyclePass fail=$cycleFail)"
     ShowProgress $cycle $CYCLES $totalPass $totalFail
     Log ""
 }

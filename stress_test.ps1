@@ -193,35 +193,72 @@ for ($cycle = 1; $cycle -le $CYCLES; $cycle++) {
             Log "      HOOK LOG (last 15 lines):"
             $hookTail | ForEach-Object { Log "        | $_" }
         }
+        # Preserve full hook log for failed browse
+        $hookSrc = Join-Path $LOGDIR "hook_log.txt"
+        if (Test-Path $hookSrc) {
+            $hookDst = Join-Path $LOGDIR ("hook_log_cycle{0}.txt" -f $cycle)
+            Copy-Item $hookSrc $hookDst -Force
+            Log "      Preserved hook log: $hookDst"
+        }
         $totalFail += $qPaths.Count
         ShowProgress $cycle $CYCLES $totalPass $totalFail
         continue
     }
 
-    # --- Step 5: Query hook for each GM entry (FOUND/NOTFOUND status check) ---
-    Log "  [5] Querying ($($qPaths.Count) checks)..."
+    # --- Step 5: Batch query hook for all GM entries ---
+    Log "  [5] Querying ($($qPaths.Count) checks via batch)..."
     $cycleOk   = $true
     $cyclePass = 0
     $cycleFail = 0
 
+    # Write query paths to temp file
+    $batchFile = Join-Path $LOGDIR "batch_queries.txt"
+    $qPaths | Out-File $batchFile -Encoding ASCII
+
+    # Run single batch query process
+    $qOutFile = Join-Path $LOGDIR "batch_results.txt"
+    if ($Debug) {
+        $batchCmd = ('"' + $BROWSE_EXE + '" --batch-query "' + $batchFile + '" --logdir ' + $LOGDIR)
+        Log "      CMD: $batchCmd"
+    }
+    $t1 = Get-Date
+    Start-Process -FilePath $BROWSE_EXE `
+        -ArgumentList "--batch-query", $batchFile, "--logdir", $LOGDIR `
+        -RedirectStandardOutput $qOutFile `
+        -RedirectStandardError  (Join-Path $LOGDIR "batch_err.txt") `
+        -NoNewWindow -Wait
+    $queryS = [int]((Get-Date) - $t1).TotalSeconds
+    $qOutRaw = if (Test-Path $qOutFile) { Get-Content $qOutFile -Raw } else { "" }
+    $resultLines = ($qOutRaw -split "`n") | Where-Object { $_ -match '^\[FOUND\]|^\[NOTFOUND\]' } | ForEach-Object { $_ -replace '\r','' }
+
+    # Build lookup of results by path
+    $resultMap = @{}
+    foreach ($rLine in $resultLines) {
+        # [FOUND] FOUND|classname|name|ip|slot  or  [NOTFOUND] path
+        if ($rLine -match '^\[NOTFOUND\]\s*(.+)') {
+            $resultMap[$Matches[1].Trim()] = 'NOTFOUND'
+        } elseif ($rLine -match '^\[FOUND\]') {
+            # Extract IP\port\slot from the FOUND line fields
+            # Format: [FOUND] FOUND|classname|deviceName|ip|slot
+            $parts = $rLine -replace '^\[FOUND\]\s*FOUND\|', '' -split '\|'
+            if ($parts.Count -ge 3) {
+                $fIp = $parts[2]
+                $fSlot = if ($parts.Count -ge 4) { $parts[3] } else { '' }
+                # Reconstruct path - find matching query path by position
+            }
+            $resultMap[$rLine] = 'FOUND'
+        }
+    }
+
+    # Match results to expectations by position (batch returns in order)
+    $rIdx = 0
     for ($qi = 0; $qi -lt $qPaths.Count; $qi++) {
         $qPath   = $qPaths[$qi]
         $qExpect = $qExpects[$qi]
         $wantFound = $qExpect -match '^FOUND'
 
-        $qOutFile = "C:\temp\query_diag.txt"
-        if ($Debug) {
-            $qCmd = ('"' + $BROWSE_EXE + '" --query "' + $qPath + '" --logdir ' + $LOGDIR)
-            Log "      CMD: $qCmd"
-        }
-        Start-Process -FilePath $BROWSE_EXE `
-            -ArgumentList "--query", $qPath, "--logdir", $LOGDIR `
-            -RedirectStandardOutput $qOutFile `
-            -RedirectStandardError  "C:\temp\query_diag_err.txt" `
-            -NoNewWindow -Wait
-        $qOutRaw = if (Test-Path $qOutFile) { Get-Content $qOutFile -Raw } else { "" }
-        $result  = (($qOutRaw -split "`n") | Where-Object { $_ -match '^\[FOUND\]|^\[NOTFOUND\]' } | Select-Object -First 1) -replace '\r',''
-
+        $result = if ($rIdx -lt $resultLines.Count) { $resultLines[$rIdx] } else { "" }
+        $rIdx++
         $gotFound = $result -match '^\[FOUND\]'
 
         if ($wantFound -eq $gotFound) {
@@ -237,9 +274,18 @@ for ($cycle = 1; $cycle -le $CYCLES; $cycle++) {
             $cycleOk = $false
         }
     }
+    Log "      Batch query completed in ${queryS}s"
 
     $status = if ($cycleOk) { "PASSED" } else { "FAILED" }
     Log "  => Cycle $cycle $status  (pass=$cyclePass fail=$cycleFail)"
+    if (-not $cycleOk) {
+        $hookSrc = Join-Path $LOGDIR "hook_log.txt"
+        if (Test-Path $hookSrc) {
+            $hookDst = Join-Path $LOGDIR ("hook_log_cycle{0}.txt" -f $cycle)
+            Copy-Item $hookSrc $hookDst -Force
+            Log "      Preserved hook log: $hookDst"
+        }
+    }
     ShowProgress $cycle $CYCLES $totalPass $totalFail
     Log ""
 }

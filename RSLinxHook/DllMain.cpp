@@ -16,6 +16,7 @@
 
 HANDLE g_hWorkerThread = NULL;
 volatile bool g_shouldStop = false;
+static IHarmonyConnector* g_pHarmony = nullptr;
 
 // ============================================================
 // AcquireNewBuses
@@ -299,7 +300,7 @@ static void AcquireNewBuses(HookConfig& config, IRSTopologyGlobals* pGlobals,
 // g_browsedBackplanes after each phase.
 // ============================================================
 
-static void RunBrowsePhases(HookConfig& config, IRSTopologyGlobals* pGlobals,
+static void RunBrowsePhases(HookConfig& config, IRSTopologyGlobals*& pGlobals,
                              std::vector<BusInfo>& buses)
 {
     g_discoveredDevices.clear();
@@ -399,6 +400,53 @@ static void RunBrowsePhases(HookConfig& config, IRSTopologyGlobals* pGlobals,
             before.totalDevices, before.identifiedDevices);
     }
 
+    // Helper: SaveTopologyXML with retry + message pump on failure
+    // If all retries fail, attempt to re-acquire pGlobals from HarmonyServices
+    auto SaveTopologyWithRetry = [&](const wchar_t* path, int maxRetries = 3) -> bool {
+        for (int attempt = 0; attempt < maxRetries; attempt++)
+        {
+            if (SaveTopologyXML(pGlobals, path)) return true;
+            if (attempt < maxRetries - 1 && !g_shouldStop)
+            {
+                Log(L"  >> SaveTopologyXML failed (attempt %d/%d), pumping messages for 2s...",
+                    attempt + 1, maxRetries);
+                for (int w = 0; w < 20 && !g_shouldStop; w++)
+                {
+                    MSG msg;
+                    while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE))
+                    { TranslateMessage(&msg); DispatchMessage(&msg); }
+                    Sleep(100);
+                }
+            }
+        }
+        // All retries failed — try re-acquiring pGlobals from HarmonyServices
+        if (g_pHarmony && !g_shouldStop)
+        {
+            Log(L"  >> Re-acquiring TopologyGlobals after persistent SaveTopologyXML failure...");
+            IUnknown* pUnk = nullptr;
+            HRESULT hr = g_pHarmony->GetSpecialObject(&CLSID_RSTopologyGlobals, &IID_IRSTopologyGlobals, &pUnk);
+            if (SUCCEEDED(hr) && pUnk)
+            {
+                IRSTopologyGlobals* pNewGlobals = nullptr;
+                pUnk->QueryInterface(IID_IRSTopologyGlobals, (void**)&pNewGlobals);
+                pUnk->Release();
+                if (pNewGlobals)
+                {
+                    pGlobals->Release();
+                    pGlobals = pNewGlobals;
+                    Log(L"  >> TopologyGlobals re-acquired, retrying save...");
+                    if (SaveTopologyXML(pGlobals, path)) return true;
+                    Log(L"  >> Save still failed after re-acquire");
+                }
+            }
+            else
+            {
+                Log(L"  >> GetSpecialObject failed: 0x%08x", hr);
+            }
+        }
+        return false;
+    };
+
     // =============================================================
     // Phase 2: Main-STA browse
     // =============================================================
@@ -451,7 +499,7 @@ static void RunBrowsePhases(HookConfig& config, IRSTopologyGlobals* pGlobals,
                 } else {
                     pollFile = LogPath(config.logDir, L"hook_topo_poll.xml");
                 }
-                if (SaveTopologyXML(pGlobals, pollFile.c_str()))
+                if (SaveTopologyWithRetry(pollFile.c_str()))
                 {
                     TopologyCounts c = CountDevicesInXML(pollFile.c_str());
                     PipeSendTopology(pollFile.c_str());
@@ -467,6 +515,14 @@ static void RunBrowsePhases(HookConfig& config, IRSTopologyGlobals* pGlobals,
                     // Track progress — reset timer when new targets appear
                     if (targetsFound > lastTargetsFound)
                     {
+                        lastTargetsFound = targetsFound;
+                        lastProgressTick = GetTickCount();
+                    }
+                    // Detect topology reset: target count dropped significantly
+                    else if (targetsFound < lastTargetsFound / 2)
+                    {
+                        Log(L"  >> Topology reset detected (%d -> %d targets), restarting stabilization",
+                            lastTargetsFound, targetsFound);
                         lastTargetsFound = targetsFound;
                         lastProgressTick = GetTickCount();
                     }
@@ -511,7 +567,7 @@ static void RunBrowsePhases(HookConfig& config, IRSTopologyGlobals* pGlobals,
     // =============================================================
     {
         std::wstring midPath = LogPath(config.logDir, config.debugXml ? L"hook_topo_mid.xml" : L"hook_topo_poll.xml");
-        SaveTopologyXML(pGlobals, midPath.c_str());
+        SaveTopologyWithRetry(midPath.c_str());
         TopologyCounts pre = CountDevicesInXML(midPath.c_str());
         Log(L"Topology after bus browse: %d devices, %d identified",
             pre.totalDevices, pre.identifiedDevices);
@@ -609,7 +665,7 @@ static void RunBrowsePhases(HookConfig& config, IRSTopologyGlobals* pGlobals,
                         } else {
                             pollFile = LogPath(config.logDir, L"hook_topo_poll.xml");
                         }
-                        if (SaveTopologyXML(pGlobals, pollFile.c_str()))
+                        if (SaveTopologyWithRetry(pollFile.c_str()))
                         {
                             TopologyCounts c = CountDevicesInXML(pollFile.c_str());
                             PipeSendTopology(pollFile.c_str());
@@ -623,6 +679,14 @@ static void RunBrowsePhases(HookConfig& config, IRSTopologyGlobals* pGlobals,
                             // Track progress: did device count increase?
                             if (c.totalDevices > lastDeviceCount)
                             {
+                                lastDeviceCount = c.totalDevices;
+                                lastProgressTick = GetTickCount();
+                            }
+                            // Detect topology reset: device count dropped significantly
+                            else if (c.totalDevices < lastDeviceCount / 2)
+                            {
+                                Log(L"  >> Topology reset detected (%d -> %d devices), restarting stabilization",
+                                    lastDeviceCount, c.totalDevices);
                                 lastDeviceCount = c.totalDevices;
                                 lastProgressTick = GetTickCount();
                             }
@@ -857,7 +921,7 @@ static void HandleQuery(const char* path, IRSTopologyGlobals* pGlobals,
 // Returns true on success, false if an SEH exception was caught.
 // ============================================================
 
-static bool SafeRunBrowsePhases(HookConfig& config, IRSTopologyGlobals* pGlobals,
+static bool SafeRunBrowsePhases(HookConfig& config, IRSTopologyGlobals*& pGlobals,
                                  std::vector<BusInfo>& buses)
 {
     __try
@@ -878,7 +942,7 @@ static bool SafeRunBrowsePhases(HookConfig& config, IRSTopologyGlobals* pGlobals
 // run browse if needed, enter command loop.
 // ============================================================
 
-static void HandleSession(HookConfig& config, IRSTopologyGlobals* pGlobals,
+static void HandleSession(HookConfig& config, IRSTopologyGlobals*& pGlobals,
                           std::vector<BusInfo>& buses)
 {
     static bool logDirSet = false;
@@ -959,7 +1023,10 @@ static void HandleSession(HookConfig& config, IRSTopologyGlobals* pGlobals,
         // without being unloaded — old CPs would otherwise accumulate and
         // fire every event twice (or more).
         ExecuteOnMainSTA(DoCleanupOnMainSTA);
-        RunBrowsePhases(config, pGlobals, buses);
+        if (!SafeRunBrowsePhases(config, pGlobals, buses))
+        {
+            Log(L"[FAIL] Initial browse crashed (SEH exception) - sending empty result");
+        }
     }
     else
     {
@@ -1034,6 +1101,7 @@ static DWORD WINAPI WorkerThread(LPVOID lpParam)
                           IID_IHarmonyConnector, (void**)&pHarmony);
     if (FAILED(hr)) { Log(L"[FAIL] HarmonyServices: 0x%08x", hr); goto cleanup; }
     pHarmony->SetServerOptions(0, L"");
+    g_pHarmony = pHarmony;
     Log(L"[OK] HarmonyServices");
 
     {
@@ -1077,9 +1145,16 @@ static DWORD WINAPI WorkerThread(LPVOID lpParam)
             Log(L"[PIPE] Waiting for client connection...");
             if (!PipeAcceptClient())
             {
-                if (!g_shouldStop)
-                    Log(L"[PIPE] AcceptClient failed: %d", GetLastError());
-                break;
+                if (g_shouldStop) break;
+                Log(L"[PIPE] AcceptClient failed: %d -- recreating pipe", GetLastError());
+                PipeDestroyServer();
+                Sleep(500);
+                if (!PipeCreateServer())
+                {
+                    Log(L"[PIPE] Recreate failed: %d -- exiting", GetLastError());
+                    break;
+                }
+                continue;
             }
             Log(L"[PIPE] Client connected");
 

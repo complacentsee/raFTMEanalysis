@@ -1165,6 +1165,110 @@ static int RunQueryMode(const std::wstring& queryPath, const std::wstring& logDi
     }
 }
 
+// ============================================================
+// Batch Query Mode — connect once, send multiple Q| commands, print all R| results
+// ============================================================
+
+static int RunBatchQueryMode(const std::wstring& queryFile, const std::wstring& logDir)
+{
+    // Read query paths from file (one per line)
+    std::vector<std::wstring> queries;
+    std::wifstream qf(queryFile.c_str());
+    if (!qf.is_open())
+    {
+        std::wcerr << L"[FAIL] Cannot open query file: " << queryFile << std::endl;
+        return 1;
+    }
+    std::wstring line;
+    while (std::getline(qf, line))
+    {
+        if (!line.empty() && line.back() == L'\r') line.pop_back();
+        if (!line.empty()) queries.push_back(line);
+    }
+    qf.close();
+
+    if (queries.empty())
+    {
+        std::wcerr << L"[FAIL] No queries in file" << std::endl;
+        return 1;
+    }
+
+    // Find RSLinxHook.dll path
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(NULL, exePath, MAX_PATH);
+    std::wstring dllPath(exePath);
+    size_t lastSlash = dllPath.rfind(L'\\');
+    if (lastSlash != std::wstring::npos) dllPath = dllPath.substr(0, lastSlash + 1);
+    dllPath += L"RSLinxHook.dll";
+
+    // Connect to hook
+    bool alreadyLoaded = TryConnectToPipe(500);
+    if (!alreadyLoaded)
+    {
+        DWORD rslinxPid = FindProcessByName(L"RSLinx.exe");
+        if (rslinxPid == 0) rslinxPid = FindProcessByName(L"RSLINX.EXE");
+        if (rslinxPid == 0) rslinxPid = FindProcessByName(L"rslinx.exe");
+        if (rslinxPid == 0)
+        {
+            std::wcerr << L"[FAIL] RSLinx.exe not found" << std::endl;
+            return 1;
+        }
+        if (!InjectDLL(rslinxPid, dllPath))
+        {
+            std::wcerr << L"[FAIL] DLL injection failed" << std::endl;
+            return 1;
+        }
+        if (!TryConnectToPipe(10000))
+        {
+            std::wcerr << L"[FAIL] Hook pipe did not appear within 10s" << std::endl;
+            return 1;
+        }
+        PipeSendLine("C|MODE=inject");
+        PipeSendLine("C|DRIVER=Test");
+        PipeSendLine("C|END");
+    }
+    else
+    {
+        PipeSendLine("C|END");
+    }
+
+    // Wait for D| (end of initial browse or skip)
+    PipeReadUntilDone(300000);
+
+    // Send all queries and collect results
+    int failures = 0;
+    for (const auto& qPath : queries)
+    {
+        char queryA[512] = {};
+        WideCharToMultiByte(CP_UTF8, 0, qPath.c_str(), -1, queryA, sizeof(queryA), NULL, NULL);
+        PipeSendLine(std::string("Q|") + queryA);
+
+        std::string resultLine;
+        PipeReadUntilDone(60000, &resultLine);
+
+        if (resultLine.length() > 2 && resultLine.substr(2, 5) == "FOUND")
+        {
+            int wlen = MultiByteToWideChar(CP_UTF8, 0, resultLine.c_str(), -1, NULL, 0);
+            if (wlen > 0)
+            {
+                std::wstring wline(wlen - 1, 0);
+                MultiByteToWideChar(CP_UTF8, 0, resultLine.c_str(), -1, &wline[0], wlen);
+                std::wcout << L"[FOUND] " << wline.substr(2) << std::endl;
+            }
+        }
+        else
+        {
+            std::wcout << L"[NOTFOUND] " << qPath << std::endl;
+            failures++;
+        }
+    }
+
+    PipeSendStop();
+    PipeClose();
+
+    return failures > 0 ? 1 : 0;
+}
+
 int wmain(int argc, wchar_t* argv[])
 {
     SetConsoleOutputCP(CP_UTF8);
@@ -1175,6 +1279,7 @@ int wmain(int argc, wchar_t* argv[])
     bool debugXml = false;
     bool probeDispids = false;
     std::wstring queryPath;
+    std::wstring batchQueryFile;
 
     // Parse arguments — --driver pushes a new entry, --ip appends to the last driver
     int posArg = 0;
@@ -1187,6 +1292,10 @@ int wmain(int argc, wchar_t* argv[])
         else if ((_wcsicmp(argv[i], L"--query") == 0 || _wcsicmp(argv[i], L"-query") == 0) && i + 1 < argc)
         {
             queryPath = argv[++i];
+        }
+        else if ((_wcsicmp(argv[i], L"--batch-query") == 0 || _wcsicmp(argv[i], L"-batch-query") == 0) && i + 1 < argc)
+        {
+            batchQueryFile = argv[++i];
         }
         else if (_wcsicmp(argv[i], L"--monitor") == 0 || _wcsicmp(argv[i], L"-monitor") == 0)
         {
@@ -1236,6 +1345,9 @@ int wmain(int argc, wchar_t* argv[])
     // Default driver if none specified
     if (drivers.empty())
         drivers.push_back({L"Test", {}});
+
+    if (!batchQueryFile.empty())
+        return RunBatchQueryMode(batchQueryFile, logDir);
 
     if (!queryPath.empty())
         return RunQueryMode(queryPath, logDir);
